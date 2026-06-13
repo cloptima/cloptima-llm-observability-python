@@ -3,8 +3,6 @@ import urllib.request
 
 from cloptima_llm_observability import extract_anthropic_usage, init_from_env
 
-INGEST_URL = "https://sdk-ingest.example.cloptima.ai/sdk/events"
-
 
 class _FakeResponse:
     status = 202
@@ -32,7 +30,6 @@ def main() -> None:
     try:
         client = init_from_env(
             env={
-                "CLOPTIMA_LLM_OBSERVABILITY_INGEST_URL": INGEST_URL,
                 "CLOPTIMA_LLM_OBSERVABILITY_API_KEY": "cloptima_pat_example",
                 "CLOPTIMA_LLM_OBSERVABILITY_APP_ID": "support-api",
                 "CLOPTIMA_LLM_OBSERVABILITY_ENVIRONMENT": "dev",

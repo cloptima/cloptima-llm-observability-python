@@ -18,7 +18,6 @@ def main() -> None:
     package_root = Path(__file__).resolve().parents[1]
     work_dir = Path(tempfile.mkdtemp(prefix="cloptima-llm-py-install-"))
     env = {**os.environ, "PIP_CACHE_DIR": str(work_dir / "pip-cache")}
-    ingest_url = "https://sdk-ingest.example.cloptima.ai/sdk/events"
     try:
         package_copy = work_dir / "package"
         shutil.copytree(package_root / "cloptima_llm_observability", package_copy / "cloptima_llm_observability")
@@ -39,7 +38,6 @@ def main() -> None:
             "assert version('cloptima-llm-observability') == '0.1.0'; "
             "assert metadata('cloptima-llm-observability')['Name'] == 'cloptima-llm-observability'; "
             "client = init_from_env(env={"
-            f"'CLOPTIMA_LLM_OBSERVABILITY_INGEST_URL':'{ingest_url}', "
             "'CLOPTIMA_LLM_OBSERVABILITY_API_KEY':'pat-test', "
             "'CLOPTIMA_LLM_OBSERVABILITY_APP_ID':'agent-api', "
             "'CLOPTIMA_LLM_OBSERVABILITY_ENVIRONMENT':'dev'}); "

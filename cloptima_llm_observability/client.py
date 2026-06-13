@@ -22,15 +22,19 @@ from typing import Any, AsyncIterator, Callable, Deque, Dict, Iterable, Iterator
 T = TypeVar("T")
 SDK_EVENT_SCHEMA_VERSION = "cloptima.llm.event.v1"
 SDK_BATCH_SCHEMA_VERSION = "cloptima.llm.batch.v1"
+DEFAULT_API_BASE_URL = "https://api.cloptima.ai"
+SDK_INGEST_PATH = "/v1/ai/integrations/sdk/events"
+OTLP_TRACES_PATH = "/v1/ai/integrations/otlp/traces"
+INTERNAL_DUAL_DELIVERY_MODE = "dual"
+INTERNAL_DUAL_DELIVERY_MODE_ENABLED = False
 INIT_ENV_PREFIX = "CLOPTIMA_LLM_OBSERVABILITY_"
 INIT_ENABLED_ENV = f"{INIT_ENV_PREFIX}ENABLED"
-INIT_INGEST_URL_ENV = f"{INIT_ENV_PREFIX}INGEST_URL"
+INIT_API_BASE_URL_ENV = f"{INIT_ENV_PREFIX}API_BASE_URL"
 INIT_API_KEY_ENV = f"{INIT_ENV_PREFIX}API_KEY"
 INIT_APP_ID_ENV = f"{INIT_ENV_PREFIX}APP_ID"
 INIT_ENVIRONMENT_ENV = f"{INIT_ENV_PREFIX}ENVIRONMENT"
 INIT_TEAM_ID_ENV = f"{INIT_ENV_PREFIX}TEAM_ID"
 INIT_DELIVERY_MODE_ENV = f"{INIT_ENV_PREFIX}DELIVERY_MODE"
-INIT_OTLP_URL_ENV = f"{INIT_ENV_PREFIX}OTLP_URL"
 INIT_OTLP_SERVICE_NAME_ENV = f"{INIT_ENV_PREFIX}OTLP_SERVICE_NAME"
 INIT_OTLP_SERVICE_VERSION_ENV = f"{INIT_ENV_PREFIX}OTLP_SERVICE_VERSION"
 
@@ -405,14 +409,23 @@ def _stream_chunk_buffer(max_buffered_chunks: int) -> Deque[T]:
 
 
 def _resolve_delivery_mode(mode: Optional[str]) -> str:
-    return mode if mode in {"cloptima_http", "otlp_http", "dual"} else "cloptima_http"
+    if mode == INTERNAL_DUAL_DELIVERY_MODE:
+        if not INTERNAL_DUAL_DELIVERY_MODE_ENABLED:
+            raise ValueError('delivery_mode "dual" is temporarily disabled')
+        return INTERNAL_DUAL_DELIVERY_MODE
+    return mode if mode in {"cloptima_http", "otlp_http"} else "cloptima_http"
 
 
-def _resolve_otlp_url(ingest_url: str, otlp_url: Optional[str]) -> str:
-    explicit = _clean_str(otlp_url)
-    if explicit:
-        return explicit
-    return ingest_url.rstrip("/").replace("/sdk/events", "/otlp/traces")
+def _resolve_api_base_url(api_base_url: Optional[str]) -> str:
+    return (_clean_str(api_base_url) or DEFAULT_API_BASE_URL).rstrip("/")
+
+
+def _resolve_ingest_url(api_base_url: str) -> str:
+    return f"{_resolve_api_base_url(api_base_url)}{SDK_INGEST_PATH}"
+
+
+def _resolve_otlp_url(api_base_url: str) -> str:
+    return f"{_resolve_api_base_url(api_base_url)}{OTLP_TRACES_PATH}"
 
 
 DEFAULT_METADATA_PRIVACY_MODE = "metadata_only"
@@ -824,11 +837,10 @@ class CloptimaLLMObservability:
     def __init__(
         self,
         *,
-        ingest_url: str,
+        api_base_url: Optional[str] = None,
         api_key: str,
         default_attribution: LLMAttribution,
         delivery_mode: str = "cloptima_http",
-        otlp_url: Optional[str] = None,
         otlp_headers: Optional[Dict[str, str]] = None,
         otlp_service_name: str = "cloptima-llm-observability",
         otlp_service_version: Optional[str] = None,
@@ -846,11 +858,12 @@ class CloptimaLLMObservability:
         async_retry_jitter_ratio: float = 0.2,
         async_http_client: Optional[Any] = None,
     ) -> None:
-        self.ingest_url = ingest_url
+        self.api_base_url = _resolve_api_base_url(api_base_url)
+        self.ingest_url = _resolve_ingest_url(self.api_base_url)
         self.api_key = api_key
         self.default_attribution = default_attribution
         self.delivery_mode = _resolve_delivery_mode(delivery_mode)
-        self.otlp_url = _resolve_otlp_url(ingest_url, otlp_url)
+        self.otlp_url = _resolve_otlp_url(self.api_base_url)
         self.otlp_headers = otlp_headers or {}
         self.otlp_service_name = otlp_service_name
         self.otlp_service_version = otlp_service_version
@@ -946,7 +959,7 @@ class CloptimaLLMObservability:
                     time.sleep(self._retry_delay_seconds(attempt))
 
         cloptima_error: Optional[BaseException] = None
-        if self.delivery_mode in {"cloptima_http", "dual"}:
+        if self.delivery_mode in {"cloptima_http", INTERNAL_DUAL_DELIVERY_MODE}:
             try:
                 _with_retries(
                     lambda: self._post_json_once(
@@ -961,9 +974,9 @@ class CloptimaLLMObservability:
                 )
             except BaseException as exc:
                 cloptima_error = exc
-                if self.delivery_mode == "dual" and self.on_error:
+                if self.delivery_mode == INTERNAL_DUAL_DELIVERY_MODE and self.on_error:
                     self.on_error(exc)
-        if self.delivery_mode in {"otlp_http", "dual"}:
+        if self.delivery_mode in {"otlp_http", INTERNAL_DUAL_DELIVERY_MODE}:
             otlp_payload = _payload_to_otlp_request(payload, self.sdk_name, self.sdk_version, self.otlp_service_name, self.otlp_service_version)
             try:
                 _with_retries(
@@ -1049,7 +1062,7 @@ class CloptimaLLMObservability:
         payload = self._payload_with_envelope_metadata(payload)
         client = await self._get_async_http_client()
         cloptima_error: Optional[BaseException] = None
-        if self.delivery_mode in {"cloptima_http", "dual"}:
+        if self.delivery_mode in {"cloptima_http", INTERNAL_DUAL_DELIVERY_MODE}:
             try:
                 response = await client.post(
                     self.ingest_url,
@@ -1064,9 +1077,9 @@ class CloptimaLLMObservability:
                 await response.aread()
             except BaseException as exc:
                 cloptima_error = exc
-                if self.delivery_mode == "dual" and self.on_error:
+                if self.delivery_mode == INTERNAL_DUAL_DELIVERY_MODE and self.on_error:
                     self.on_error(exc)
-        if self.delivery_mode in {"otlp_http", "dual"}:
+        if self.delivery_mode in {"otlp_http", INTERNAL_DUAL_DELIVERY_MODE}:
             otlp_payload = _payload_to_otlp_request(payload, self.sdk_name, self.sdk_version, self.otlp_service_name, self.otlp_service_version)
             try:
                 response = await client.post(
@@ -2059,7 +2072,7 @@ def is_enabled(
     *,
     env: Optional[Mapping[str, str]] = None,
     enabled: Optional[bool] = None,
-    ingest_url: Optional[str] = None,
+    api_base_url: Optional[str] = None,
     api_key: Optional[str] = None,
     default_attribution: Optional[Union[LLMAttribution, Dict[str, Any]]] = None,
 ) -> bool:
@@ -2072,10 +2085,9 @@ def is_enabled(
     if isinstance(default_attribution, LLMAttribution):
         attribution = default_attribution.__dict__.copy()
     app_id = _clean_str(attribution.get("app_id")) or _clean_str(current_env.get(INIT_APP_ID_ENV))
-    environment = _clean_str(attribution.get("environment")) or _clean_str(current_env.get(INIT_ENVIRONMENT_ENV))
-    resolved_ingest_url = _clean_str(ingest_url) or _clean_str(current_env.get(INIT_INGEST_URL_ENV))
+    environment = _clean_str(attribution.get("environment")) or _clean_str(current_env.get(INIT_ENVIRONMENT_ENV)) or "production"
     resolved_api_key = _clean_str(api_key) or _clean_str(current_env.get(INIT_API_KEY_ENV))
-    return bool(resolved_ingest_url and resolved_api_key and app_id and environment)
+    return bool(resolved_api_key and app_id and environment)
 
 
 def init_from_env(
@@ -2084,11 +2096,10 @@ def init_from_env(
     enabled: Optional[bool] = None,
     strict: bool = False,
     on_init_error: Optional[Callable[[BaseException], None]] = None,
-    ingest_url: Optional[str] = None,
+    api_base_url: Optional[str] = None,
     api_key: Optional[str] = None,
     default_attribution: Optional[Union[LLMAttribution, Dict[str, Any]]] = None,
     delivery_mode: Optional[str] = None,
-    otlp_url: Optional[str] = None,
     otlp_headers: Optional[Dict[str, str]] = None,
     otlp_service_name: Optional[str] = None,
     otlp_service_version: Optional[str] = None,
@@ -2115,17 +2126,15 @@ def init_from_env(
     if isinstance(default_attribution, LLMAttribution):
         attribution_values = default_attribution.__dict__.copy()
 
-    resolved_ingest_url = _clean_str(ingest_url) or _clean_str(current_env.get(INIT_INGEST_URL_ENV))
+    resolved_api_base_url = _clean_str(api_base_url) or _clean_str(current_env.get(INIT_API_BASE_URL_ENV)) or DEFAULT_API_BASE_URL
     resolved_api_key = _clean_str(api_key) or _clean_str(current_env.get(INIT_API_KEY_ENV))
     resolved_app_id = _clean_str(attribution_values.get("app_id")) or _clean_str(current_env.get(INIT_APP_ID_ENV))
-    resolved_environment = _clean_str(attribution_values.get("environment")) or _clean_str(current_env.get(INIT_ENVIRONMENT_ENV))
+    resolved_environment = _clean_str(attribution_values.get("environment")) or _clean_str(current_env.get(INIT_ENVIRONMENT_ENV)) or "production"
     resolved_team_id = _clean_str(attribution_values.get("team_id")) or _clean_str(current_env.get(INIT_TEAM_ID_ENV))
 
     missing_fields = [
-        INIT_INGEST_URL_ENV if not resolved_ingest_url else None,
         INIT_API_KEY_ENV if not resolved_api_key else None,
         INIT_APP_ID_ENV if not resolved_app_id else None,
-        INIT_ENVIRONMENT_ENV if not resolved_environment else None,
     ]
     missing = [field for field in missing_fields if field]
     if missing:
@@ -2142,7 +2151,7 @@ def init_from_env(
         return disabled_client()
 
     return CloptimaLLMObservability(
-        ingest_url=resolved_ingest_url or "",
+        api_base_url=resolved_api_base_url or "",
         api_key=resolved_api_key or "",
         default_attribution=LLMAttribution(
             app_id=resolved_app_id or "",
@@ -2165,7 +2174,6 @@ def init_from_env(
             repository_id=_clean_str(attribution_values.get("repository_id")),
         ),
         delivery_mode=delivery_mode or _clean_str(current_env.get(INIT_DELIVERY_MODE_ENV)) or "cloptima_http",
-        otlp_url=otlp_url or _clean_str(current_env.get(INIT_OTLP_URL_ENV)),
         otlp_headers=otlp_headers,
         otlp_service_name=otlp_service_name or _clean_str(current_env.get(INIT_OTLP_SERVICE_NAME_ENV)) or "cloptima-llm-observability",
         otlp_service_version=otlp_service_version or _clean_str(current_env.get(INIT_OTLP_SERVICE_VERSION_ENV)),

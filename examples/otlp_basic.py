@@ -1,12 +1,7 @@
 import json
 import urllib.request
 
-from cloptima_llm_observability import (
-    extract_openai_usage,
-    init_from_env,
-)
-
-DEFAULT_INGEST_URL = "https://api.cloptima.ai/v1/ai/integrations/sdk/events"
+from cloptima_llm_observability import extract_openai_usage, init_from_env
 
 
 class _FakeResponse:
@@ -27,31 +22,30 @@ def main() -> None:
 
     def fake_urlopen(request, timeout):
         payload = json.loads((request.data or b"{}").decode("utf-8"))
-        if payload.get("provider") != "openai" or payload.get("model") != "gpt-4.1-mini":
-            raise RuntimeError("unexpected telemetry payload")
-        if request.full_url != DEFAULT_INGEST_URL or not request.headers.get("Authorization"):
-            raise RuntimeError("unexpected telemetry request")
+        span = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+        if request.full_url != "https://api.cloptima.ai/v1/ai/integrations/otlp/traces":
+            raise RuntimeError("unexpected OTLP endpoint")
+        if span.get("name") != "llm.openai.gpt-4.1-mini":
+            raise RuntimeError("unexpected OTLP telemetry payload")
         if timeout <= 0:
             raise RuntimeError("timeout must be positive")
         return _FakeResponse()
 
     urllib.request.urlopen = fake_urlopen
-
     try:
         client = init_from_env(
             env={
                 "CLOPTIMA_LLM_OBSERVABILITY_API_KEY": "cloptima_pat_example",
                 "CLOPTIMA_LLM_OBSERVABILITY_APP_ID": "support-api",
                 "CLOPTIMA_LLM_OBSERVABILITY_ENVIRONMENT": "dev",
-                "CLOPTIMA_LLM_OBSERVABILITY_TEAM_ID": "customer-support",
+                "CLOPTIMA_LLM_OBSERVABILITY_DELIVERY_MODE": "otlp_http",
             }
         )
-
         client.observe_call(
             provider="openai",
             model="gpt-4.1-mini",
             call=lambda: {
-                "id": "chatcmpl-example",
+                "id": "chatcmpl-otlp-example",
                 "model": "gpt-4.1-mini",
                 "usage": {
                     "prompt_tokens": 10,
@@ -61,8 +55,8 @@ def main() -> None:
             },
             extract_usage=extract_openai_usage,
             fire_and_forget=False,
-            feature_id="summary_generation",
-            metadata={"integration_mode": "direct_sdk"},
+            feature_id="customer_summary",
+            metadata={"integration_mode": "otlp_http"},
         )
     finally:
         urllib.request.urlopen = original_urlopen

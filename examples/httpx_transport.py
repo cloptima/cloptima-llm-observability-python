@@ -4,8 +4,6 @@ from types import SimpleNamespace
 
 from cloptima_llm_observability import init_from_env, instrument_httpx_transport
 
-INGEST_URL = "https://sdk-ingest.example.cloptima.ai/sdk/events"
-
 
 class _FakeResponse:
     status = 202
@@ -64,7 +62,6 @@ def main() -> None:
     try:
         client = init_from_env(
             env={
-                "CLOPTIMA_LLM_OBSERVABILITY_INGEST_URL": INGEST_URL,
                 "CLOPTIMA_LLM_OBSERVABILITY_API_KEY": "cloptima_pat_example",
                 "CLOPTIMA_LLM_OBSERVABILITY_APP_ID": "support-api",
                 "CLOPTIMA_LLM_OBSERVABILITY_ENVIRONMENT": "dev",

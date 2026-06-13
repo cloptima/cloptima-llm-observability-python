@@ -46,8 +46,12 @@ from cloptima_llm_observability import (
     validate_payload,
 )
 
-TEST_INGEST_URL = "https://sdk-ingest.example.cloptima.ai/sdk/events"
-TEST_OTLP_URL = "https://sdk-ingest.example.cloptima.ai/otlp/traces"
+TEST_API_BASE_URL = "https://sdk-ingest.example.cloptima.ai"
+DEFAULT_API_BASE_URL = "https://api.cloptima.ai"
+TEST_INGEST_URL = f"{TEST_API_BASE_URL}/v1/ai/integrations/sdk/events"
+TEST_OTLP_URL = f"{TEST_API_BASE_URL}/v1/ai/integrations/otlp/traces"
+DEFAULT_INGEST_URL = f"{DEFAULT_API_BASE_URL}/v1/ai/integrations/sdk/events"
+DEFAULT_OTLP_URL = f"{DEFAULT_API_BASE_URL}/v1/ai/integrations/otlp/traces"
 
 
 class _FakeResponse:
@@ -207,7 +211,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
 
         client = init_from_env(
             env={
-                "CLOPTIMA_LLM_OBSERVABILITY_INGEST_URL": TEST_INGEST_URL,
+                "CLOPTIMA_LLM_OBSERVABILITY_API_BASE_URL": TEST_API_BASE_URL,
                 "CLOPTIMA_LLM_OBSERVABILITY_API_KEY": "pat-env",
                 "CLOPTIMA_LLM_OBSERVABILITY_APP_ID": "agent-api",
                 "CLOPTIMA_LLM_OBSERVABILITY_ENVIRONMENT": "prod",
@@ -219,7 +223,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         self.assertTrue(
             is_enabled(
                 env={
-                    "CLOPTIMA_LLM_OBSERVABILITY_INGEST_URL": TEST_INGEST_URL,
+                    "CLOPTIMA_LLM_OBSERVABILITY_API_BASE_URL": TEST_API_BASE_URL,
                     "CLOPTIMA_LLM_OBSERVABILITY_API_KEY": "pat-env",
                     "CLOPTIMA_LLM_OBSERVABILITY_APP_ID": "agent-api",
                     "CLOPTIMA_LLM_OBSERVABILITY_ENVIRONMENT": "prod",
@@ -235,6 +239,87 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         self.assertEqual(body["metadata"]["environment"], "prod")
         self.assertEqual(body["metadata"]["team_id"], "platform")
 
+    def test_init_from_env_uses_default_ingest_url_and_production_environment(self) -> None:
+        observed = {}
+
+        def fake_urlopen(request, timeout):
+            observed["request"] = request
+            return _FakeResponse()
+
+        client = init_from_env(
+            env={
+                "CLOPTIMA_LLM_OBSERVABILITY_API_KEY": "pat-env",
+                "CLOPTIMA_LLM_OBSERVABILITY_APP_ID": "agent-api",
+            }
+        )
+
+        self.assertTrue(client.is_enabled())
+        self.assertTrue(
+            is_enabled(
+                env={
+                    "CLOPTIMA_LLM_OBSERVABILITY_API_KEY": "pat-env",
+                    "CLOPTIMA_LLM_OBSERVABILITY_APP_ID": "agent-api",
+                }
+            )
+        )
+
+        with patch.object(urllib.request, "urlopen", fake_urlopen):
+            client.record(LLMUsageEvent(provider="openai", model="gpt-4o-mini"))
+
+        self.assertEqual(observed["request"].full_url, DEFAULT_INGEST_URL)
+        body = json.loads(observed["request"].data.decode("utf-8"))
+        self.assertEqual(body["metadata"]["environment"], "production")
+
+    def test_is_enabled_requires_api_key_and_app_id_only(self) -> None:
+        self.assertFalse(
+            is_enabled(
+                env={
+                    "CLOPTIMA_LLM_OBSERVABILITY_APP_ID": "agent-api",
+                }
+            )
+        )
+        self.assertFalse(
+            is_enabled(
+                env={
+                    "CLOPTIMA_LLM_OBSERVABILITY_API_KEY": "pat-env",
+                }
+            )
+        )
+        self.assertTrue(
+            is_enabled(
+                env={
+                    "CLOPTIMA_LLM_OBSERVABILITY_API_KEY": "pat-env",
+                    "CLOPTIMA_LLM_OBSERVABILITY_APP_ID": "agent-api",
+                }
+            )
+        )
+
+    def test_direct_constructor_derives_default_otlp_url_from_default_ingest_url(self) -> None:
+        observed_requests = []
+
+        def fake_urlopen(request, timeout):
+            observed_requests.append(request)
+            return _FakeResponse()
+
+        client = CloptimaLLMObservability(
+            api_key="pat-env",
+            default_attribution=LLMAttribution(app_id="agent-api", environment="production"),
+            delivery_mode="otlp_http",
+        )
+
+        with patch.object(urllib.request, "urlopen", fake_urlopen):
+            client.record(LLMUsageEvent(provider="openai", model="gpt-4o-mini"))
+
+        self.assertEqual([request.full_url for request in observed_requests], [DEFAULT_OTLP_URL])
+
+    def test_direct_constructor_rejects_dormant_dual_delivery_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, 'delivery_mode "dual" is temporarily disabled'):
+            CloptimaLLMObservability(
+                api_key="pat-env",
+                default_attribution=LLMAttribution(app_id="agent-api", environment="production"),
+                delivery_mode="dual",
+            )
+
     def test_init_from_env_stays_fail_open_but_diagnosable_when_explicitly_enabled(self) -> None:
         observed_errors = []
 
@@ -249,6 +334,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         self.assertFalse(client.is_enabled())
         self.assertEqual(len(observed_errors), 1)
         self.assertIn("missing required configuration", observed_errors[0])
+        self.assertIn("API_KEY", observed_errors[0])
         self.assertIn("missing required configuration", str(client.get_init_error()))
 
     def test_disabled_client_can_be_created_directly(self) -> None:
@@ -311,7 +397,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             sdk_version="0.1.0",
             default_attribution=LLMAttribution(
@@ -376,7 +462,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(
                 app_id="agent-api",
@@ -414,7 +500,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
             async_retry_count=1,
@@ -434,7 +520,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(
                 app_id="agent-api",
@@ -487,7 +573,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             sdk_version="0.1.0",
             delivery_mode="otlp_http",
@@ -542,7 +628,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         self.assertEqual(attrs["feature_id"]["stringValue"], "support-agent")
         self.assertEqual(attrs["environment"]["stringValue"], "prod")
 
-    def test_record_does_not_leak_cloptima_authorization_to_custom_otlp_collectors(self) -> None:
+    def test_record_does_not_leak_cloptima_authorization_to_non_cloptima_otlp_hosts(self) -> None:
         observed = {}
 
         def fake_urlopen(request, timeout):
@@ -550,17 +636,16 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url="http://127.0.0.1:4318",
             api_key="pat-test",
             delivery_mode="otlp_http",
-            otlp_url="http://127.0.0.1:4318/v1/traces",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
 
         with patch.object(urllib.request, "urlopen", fake_urlopen):
             client.record(LLMUsageEvent(provider="openai", model="gpt-4o-mini", source_event_id="event-otlp-local-1"))
 
-        self.assertEqual(observed["request"].full_url, "http://127.0.0.1:4318/v1/traces")
+        self.assertEqual(observed["request"].full_url, "http://127.0.0.1:4318/v1/ai/integrations/otlp/traces")
         self.assertIsNone(observed["request"].headers.get("Authorization"))
 
     def test_record_applies_metadata_privacy_rules_before_ingest(self) -> None:
@@ -572,7 +657,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
             metadata_policy=MetadataPrivacyPolicy(
@@ -615,7 +700,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
             metadata_policy=MetadataPrivacyPolicy(mode="strict_finops"),
@@ -639,93 +724,15 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         self.assertNotIn("conversation_id", body["metadata"])
         self.assertNotIn("prompt", body["metadata"])
 
-    def test_record_dual_delivery_posts_both_canonical_and_otlp_payloads(self) -> None:
-        observed_requests = []
-
-        def fake_urlopen(request, timeout):
-            observed_requests.append(request)
-            return _FakeResponse()
-
-        client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
-            api_key="pat-test",
-            delivery_mode="dual",
-            otlp_headers={"x-otlp-token": "edge-secret"},
-            default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
-        )
-
-        with patch.object(urllib.request, "urlopen", fake_urlopen):
-            client.record(
-                LLMUsageEvent(
-                    provider="anthropic",
-                    model="claude-3-5-sonnet",
-                    source_event_id="event-dual-1",
-                )
+    def test_init_from_env_rejects_dormant_dual_delivery_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, 'delivery_mode "dual" is temporarily disabled'):
+            init_from_env(
+                env={
+                    "CLOPTIMA_LLM_OBSERVABILITY_API_KEY": "pat-env",
+                    "CLOPTIMA_LLM_OBSERVABILITY_APP_ID": "agent-api",
+                    "CLOPTIMA_LLM_OBSERVABILITY_DELIVERY_MODE": "dual",
+                }
             )
-
-        self.assertEqual(len(observed_requests), 2)
-        self.assertEqual(observed_requests[0].full_url, TEST_INGEST_URL)
-        self.assertEqual(observed_requests[1].full_url, TEST_OTLP_URL)
-        self.assertEqual(json.loads(observed_requests[0].data.decode("utf-8"))["source_event_id"], "event-dual-1")
-        self.assertEqual(observed_requests[1].headers["X-otlp-token"], "edge-secret")
-        otlp_span = json.loads(observed_requests[1].data.decode("utf-8"))["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
-        attrs = {attribute["key"]: attribute["value"] for attribute in otlp_span["attributes"]}
-        self.assertEqual(attrs["source_event_id"]["stringValue"], "event-dual-1")
-
-    def test_record_dual_delivery_keeps_cloptima_leg_successful_when_otlp_mirror_fails(self) -> None:
-        observed_requests = []
-        errors = []
-
-        def fake_urlopen(request, timeout):
-            observed_requests.append(request)
-            if request.full_url.endswith("/v1/traces"):
-                raise urllib.error.HTTPError(request.full_url, 503, "otlp unavailable", hdrs=None, fp=None)
-            return _FakeResponse()
-
-        client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
-            api_key="pat-test",
-            delivery_mode="dual",
-            otlp_url="http://127.0.0.1:4318/v1/traces",
-            async_retry_count=0,
-            default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
-            on_error=errors.append,
-        )
-
-        with patch.object(urllib.request, "urlopen", fake_urlopen):
-            client.record(LLMUsageEvent(provider="openai", model="gpt-4o-mini", source_event_id="event-dual-failover-1"))
-
-        self.assertEqual(len(observed_requests), 2)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("OTLP ingest failed", str(errors[0]))
-
-    def test_record_dual_delivery_reports_cloptima_leg_failures_before_raising(self) -> None:
-        observed_requests = []
-        errors = []
-
-        def fake_urlopen(request, timeout):
-            observed_requests.append(request)
-            if request.full_url.endswith("/sdk/events"):
-                raise urllib.error.HTTPError(request.full_url, 503, "cloptima unavailable", hdrs=None, fp=None)
-            return _FakeResponse()
-
-        client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
-            api_key="pat-test",
-            delivery_mode="dual",
-            otlp_url="http://127.0.0.1:4318/v1/traces",
-            async_retry_count=0,
-            default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
-            on_error=errors.append,
-        )
-
-        with patch.object(urllib.request, "urlopen", fake_urlopen):
-            with self.assertRaisesRegex(RuntimeError, "Cloptima LLM ingest failed with HTTP 503"):
-                client.record(LLMUsageEvent(provider="openai", model="gpt-4o-mini", source_event_id="event-dual-cloptima-fail-1"))
-
-        self.assertEqual(len(observed_requests), 2)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("Cloptima LLM ingest failed with HTTP 503", str(errors[0]))
 
     def test_observe_records_successful_openai_usage(self) -> None:
         observed = {}
@@ -735,7 +742,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -794,7 +801,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -833,7 +840,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -961,7 +968,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -989,7 +996,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         FakeAsyncClient.observed = observed
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             timeout_seconds=3,
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
@@ -1025,7 +1032,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         FakeAsyncClient.observed = observed
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             timeout_seconds=3,
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
@@ -1053,7 +1060,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         FakeAsyncClient.observed = observed
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             delivery_mode="otlp_http",
             otlp_service_name="checkout-api",
@@ -1084,7 +1091,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         self.assertEqual(attrs["gen_ai.request.id"]["stringValue"], "request-async-otlp")
         self.assertEqual(attrs["gen_ai.usage.total_tokens"]["intValue"], 6)
 
-    def test_arecord_does_not_leak_cloptima_authorization_to_custom_otlp_collectors(self) -> None:
+    def test_arecord_does_not_leak_cloptima_authorization_to_non_cloptima_otlp_hosts(self) -> None:
         observed = {}
 
         class FakeAsyncClient(_FakeAsyncClient):
@@ -1094,17 +1101,16 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         FakeAsyncClient.observed = observed
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url="http://127.0.0.1:4318",
             api_key="pat-test",
             delivery_mode="otlp_http",
-            otlp_url="http://127.0.0.1:4318/v1/traces",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
 
         with patch.dict(sys.modules, {"httpx": SimpleNamespace(AsyncClient=FakeAsyncClient)}):
             asyncio.run(client.arecord(LLMUsageEvent(provider="openai", model="gpt-4o-mini", source_event_id="event-async-otlp-local")))
 
-        self.assertEqual(observed["url"], "http://127.0.0.1:4318/v1/traces")
+        self.assertEqual(observed["url"], "http://127.0.0.1:4318/v1/ai/integrations/otlp/traces")
         self.assertNotIn("authorization", observed["headers"])
 
     def test_record_async_uses_bounded_worker_and_batches_events(self) -> None:
@@ -1115,7 +1121,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
             async_batch_size=10,
@@ -1142,7 +1148,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
             async_flush_interval_seconds=0,
@@ -1161,7 +1167,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         errors = []
         drops = []
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
             async_queue_max_size=1,
@@ -1187,10 +1193,10 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         errors = []
 
         def failing_urlopen(_request, timeout=None):
-            raise urllib.error.URLError("collector unavailable")
+            raise urllib.error.URLError("otlp endpoint unavailable")
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
             async_flush_interval_seconds=0,
@@ -1204,7 +1210,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
 
         self.assertEqual(client.stats().failed_batches, 1)
         self.assertEqual(len(errors), 1)
-        self.assertIn("collector unavailable", str(errors[0]))
+        self.assertIn("otlp endpoint unavailable", str(errors[0]))
 
     def test_observe_async_awaits_call_and_records_usage(self) -> None:
         observed = {}
@@ -1225,7 +1231,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             }
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -1252,7 +1258,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             pass
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -1289,7 +1295,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             }
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
             async_batch_size=10,
@@ -1334,7 +1340,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             }
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -1366,7 +1372,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         FakeAsyncClient.observed = observed
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -1400,7 +1406,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -1440,7 +1446,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -1478,7 +1484,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             return _FakeResponse()
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -1517,7 +1523,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             raise RuntimeError("stream interrupted")
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -1553,7 +1559,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             }
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
             async_batch_size=10,
@@ -1601,7 +1607,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             }
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -1643,7 +1649,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             }
 
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -1760,7 +1766,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         )
         httpx_client = _FakeHttpxClient(response=response)
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -1794,7 +1800,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         observed = {"posts": 0}
         httpx_client = _FakeHttpxClient(response=_FakeHttpxResponse({}, status_code=204))
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -1836,7 +1842,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         )
         transport = _FakeHttpxTransport(error=RuntimeError("connection reset"))
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -1863,7 +1869,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
     def test_instrument_httpx_client_preserves_sync_context_manager_behavior(self) -> None:
         httpx_client = _FakeHttpxClient(response=_FakeHttpxResponse({"ok": True}))
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
         )
@@ -1904,7 +1910,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         _FakeAsyncClient.observed = {}
         ingest_client = _FakeAsyncClient(timeout=3.0)
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
             async_http_client=ingest_client,
@@ -1934,7 +1940,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
     def test_instrument_httpx_client_preserves_async_context_manager_behavior(self) -> None:
         httpx_client = _FakeAsyncHttpxClient(response=_FakeHttpxResponse({"ok": True}))
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
             async_http_client=_FakeAsyncClient(timeout=3.0),
@@ -1960,7 +1966,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         custom_async_client = _FakeAsyncClient(timeout=3.0)
         custom_async_client.observed = observed
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
             async_http_client=custom_async_client,
@@ -1995,7 +2001,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         custom_async_client = _FakeAsyncClient(timeout=3.0)
         custom_async_client.is_closed = True
         client = CloptimaLLMObservability(
-            ingest_url=TEST_INGEST_URL,
+            api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
             async_http_client=custom_async_client,
