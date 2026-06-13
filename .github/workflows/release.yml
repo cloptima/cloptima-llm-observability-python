@@ -1,0 +1,85 @@
+name: Python SDK Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Verify tag matches package version
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          project = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          package_version = project["project"]["version"]
+          ref_name = os.environ["GITHUB_REF_NAME"]
+          if not ref_name.startswith("v"):
+              raise SystemExit(f"Release workflow requires a v-prefixed tag, got: {ref_name}")
+          tag_version = ref_name[1:]
+          if package_version != tag_version:
+              raise SystemExit(
+                  f"Tag version {tag_version} does not match pyproject.toml version {package_version}"
+              )
+          PY
+
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Install package
+        run: pip install .
+
+      - name: Run tests
+        run: python -m unittest tests.test_client tests.test_packaging
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Validate distributions
+        run: python -m twine check dist/*
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v5
+        with:
+          name: python-package-distributions
+          path: dist/
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/cloptima-llm-observability
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v6
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

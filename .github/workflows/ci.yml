@@ -1,0 +1,30 @@
+name: Python SDK CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: pip install .
+
+      - name: Run tests
+        run: python -m unittest tests.test_client tests.test_packaging
