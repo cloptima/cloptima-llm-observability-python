@@ -26,6 +26,7 @@ from typing import Any, AsyncIterator, Callable, Deque, Dict, Iterable, Iterator
 T = TypeVar("T")
 SDK_EVENT_SCHEMA_VERSION = "cloptima.llm.event.v1"
 SDK_BATCH_SCHEMA_VERSION = "cloptima.llm.batch.v1"
+PACKAGE_VERSION = "0.1.3"
 DEFAULT_API_BASE_URL = "https://api.cloptima.ai"
 SDK_INGEST_PATH = "/v1/ai/integrations/sdk/events"
 OTLP_TRACES_PATH = "/v1/ai/integrations/otlp/traces"
@@ -1657,7 +1658,16 @@ class CloptimaLLMObservability:
         }
         if not any(key.lower() == "authorization" for key in headers) and _should_attach_default_otlp_authorization(self.otlp_url):
             headers["authorization"] = f"Bearer {self.api_key}"
+        if not any(key.lower() == "user-agent" for key in headers):
+            headers["user-agent"] = f"{self.sdk_name}/{self.sdk_version or PACKAGE_VERSION}"
         return headers
+
+    def _cloptima_request_headers(self) -> Dict[str, str]:
+        return {
+            "content-type": "application/json",
+            "authorization": f"Bearer {self.api_key}",
+            "user-agent": f"{self.sdk_name}/{self.sdk_version or PACKAGE_VERSION}",
+        }
 
     def record(self, event: LLMUsageEvent) -> None:
         self._post_payload(self._event_payload(event))
@@ -1719,10 +1729,7 @@ class CloptimaLLMObservability:
                     lambda: self._post_json_once(
                         self.ingest_url,
                         payload,
-                        {
-                            "authorization": f"Bearer {self.api_key}",
-                            "content-type": "application/json",
-                        },
+                        self._cloptima_request_headers(),
                         "Cloptima LLM ingest",
                     )
                 )
@@ -1821,10 +1828,7 @@ class CloptimaLLMObservability:
                 response = await client.post(
                     self.ingest_url,
                     content=self._payload_body(payload),
-                    headers={
-                        "authorization": f"Bearer {self.api_key}",
-                        "content-type": "application/json",
-                    },
+                    headers=self._cloptima_request_headers(),
                 )
                 if response.status_code >= 400:
                     raise RuntimeError(f"Cloptima LLM ingest failed with HTTP {response.status_code}")
