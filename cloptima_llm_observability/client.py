@@ -1103,6 +1103,19 @@ def _otlp_attribute_value(value: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _otlp_extra_usage_pairs(payload: Dict[str, Any]) -> List[tuple[str, Any]]:
+    raw_units = payload.get("extra_usage_units")
+    if not isinstance(raw_units, dict) or not raw_units:
+        return []
+    pairs: List[tuple[str, Any]] = [("extra_usage_units", raw_units)]
+    for key in sorted(raw_units):
+        key_name = _clean_str(key)
+        value = _clean_int(raw_units.get(key))
+        if key_name and value is not None and value > 0:
+            pairs.append((f"gen_ai.usage.{key_name}", value))
+    return pairs
+
+
 def _otlp_attributes_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     pairs: List[tuple[str, Any]] = [
@@ -1122,6 +1135,7 @@ def _otlp_attributes_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any
         ("cloptima.request_id", _clean_str(payload.get("request_id"))),
         ("trace_id", _clean_str(payload.get("trace_id"))),
     ]
+    pairs.extend(_otlp_extra_usage_pairs(payload))
     for key, value in metadata.items():
         pairs.append((str(key), value))
     attributes: List[Dict[str, Any]] = []
@@ -1434,7 +1448,7 @@ def create_observed_stream(
     metadata_policy: Optional[Union["MetadataPrivacyPolicy", Dict[str, Any]]] = None,
     request_id: Optional[str] = None,
     trace_id: Optional[str] = None,
-    fire_and_forget: bool = False,
+    fire_and_forget: bool = True,
     max_buffered_chunks: int = 256,
 ) -> Callable[..., Iterator[Any]]:
     def _invoke(call: Callable[[], Iterable[Any]], **overrides: Any) -> Iterator[Any]:
@@ -1468,7 +1482,7 @@ def create_observed_async_stream(
     metadata_policy: Optional[Union["MetadataPrivacyPolicy", Dict[str, Any]]] = None,
     request_id: Optional[str] = None,
     trace_id: Optional[str] = None,
-    fire_and_forget: bool = False,
+    fire_and_forget: bool = True,
     max_buffered_chunks: int = 256,
 ) -> Callable[..., AsyncIterator[Any]]:
     def _invoke(call: Callable[[], Any], **overrides: Any) -> AsyncIterator[Any]:
@@ -1579,7 +1593,7 @@ def bind_observed_stream(
     metadata_policy: Optional[Union["MetadataPrivacyPolicy", Dict[str, Any]]] = None,
     request_id: Optional[str] = None,
     trace_id: Optional[str] = None,
-    fire_and_forget: bool = False,
+    fire_and_forget: bool = True,
     max_buffered_chunks: int = 256,
     resolve_overrides: Optional[Callable[..., Dict[str, Any]]] = None,
 ) -> Callable[..., Iterator[Any]]:
@@ -1619,7 +1633,7 @@ def bind_observed_async_stream(
     metadata_policy: Optional[Union["MetadataPrivacyPolicy", Dict[str, Any]]] = None,
     request_id: Optional[str] = None,
     trace_id: Optional[str] = None,
-    fire_and_forget: bool = False,
+    fire_and_forget: bool = True,
     max_buffered_chunks: int = 256,
     resolve_overrides: Optional[Callable[..., Dict[str, Any]]] = None,
 ) -> Callable[..., AsyncIterator[Any]]:
@@ -2037,6 +2051,38 @@ class CloptimaLLMObservability:
         if cloptima_error is not None:
             raise cloptima_error
 
+    def _report_observe_error(self, exc: BaseException) -> None:
+        if self.on_error:
+            self.on_error(exc)
+
+    def _record_observed_event(
+        self,
+        event: LLMUsageEvent,
+        metadata_policy: Optional[Union[MetadataPrivacyPolicy, Dict[str, Any]]],
+        fire_and_forget: bool,
+    ) -> None:
+        if fire_and_forget:
+            self._record_async_with_policy(event, metadata_policy)
+            return
+        try:
+            self._post_payload(self._event_payload(event, metadata_policy))
+        except BaseException as exc:
+            self._report_observe_error(exc)
+
+    async def _arecord_observed_event(
+        self,
+        event: LLMUsageEvent,
+        metadata_policy: Optional[Union[MetadataPrivacyPolicy, Dict[str, Any]]],
+        fire_and_forget: bool,
+    ) -> None:
+        if fire_and_forget:
+            self._record_async_with_policy(event, metadata_policy)
+            return
+        try:
+            await self._apost_payload(self._event_payload(event, metadata_policy))
+        except BaseException as exc:
+            self._report_observe_error(exc)
+
     def record_async(self, event: LLMUsageEvent) -> None:
         self._record_async_with_policy(event)
 
@@ -2219,10 +2265,7 @@ class CloptimaLLMObservability:
                 attribution=attribution or {},
                 metadata={**(metadata or {}), **(extracted.get("metadata") or {})},
             )
-            if fire_and_forget:
-                self._record_async_with_policy(event, metadata_policy)
-            else:
-                self._post_payload(self._event_payload(event, metadata_policy))
+            self._record_observed_event(event, metadata_policy, fire_and_forget)
             return result
         except BaseException as exc:
             completed = datetime.now(timezone.utc)
@@ -2240,10 +2283,7 @@ class CloptimaLLMObservability:
                 attribution=attribution or {},
                 metadata=metadata or {},
             )
-            if fire_and_forget:
-                self._record_async_with_policy(event, metadata_policy)
-            else:
-                self._post_payload(self._event_payload(event, metadata_policy))
+            self._record_observed_event(event, metadata_policy, fire_and_forget)
             raise
 
     async def observe_async(
@@ -2294,10 +2334,7 @@ class CloptimaLLMObservability:
                 attribution=attribution or {},
                 metadata={**(metadata or {}), **(extracted.get("metadata") or {})},
             )
-            if fire_and_forget:
-                self._record_async_with_policy(event, metadata_policy)
-            else:
-                await self._apost_payload(self._event_payload(event, metadata_policy))
+            await self._arecord_observed_event(event, metadata_policy, fire_and_forget)
             return result
         except BaseException as exc:
             completed = datetime.now(timezone.utc)
@@ -2315,10 +2352,7 @@ class CloptimaLLMObservability:
                 attribution=attribution or {},
                 metadata=metadata or {},
             )
-            if fire_and_forget:
-                self._record_async_with_policy(event, metadata_policy)
-            else:
-                await self._apost_payload(self._event_payload(event, metadata_policy))
+            await self._arecord_observed_event(event, metadata_policy, fire_and_forget)
             raise
 
     def observe_stream(
@@ -2334,7 +2368,7 @@ class CloptimaLLMObservability:
         metadata_policy: Optional[Union[MetadataPrivacyPolicy, Dict[str, Any]]] = None,
         request_id: Optional[str] = None,
         trace_id: Optional[str] = None,
-        fire_and_forget: bool = False,
+        fire_and_forget: bool = True,
         max_buffered_chunks: int = 256,
     ) -> Iterator[T]:
         started = datetime.now(timezone.utc)
@@ -2372,10 +2406,7 @@ class CloptimaLLMObservability:
                 attribution=attribution or {},
                 metadata={**(metadata or {}), **(extracted.get("metadata") or {}), "streamed": True},
             )
-            if fire_and_forget:
-                self._record_async_with_policy(event, metadata_policy)
-            else:
-                self._post_payload(self._event_payload(event, metadata_policy))
+            self._record_observed_event(event, metadata_policy, fire_and_forget)
         except BaseException as exc:
             completed = datetime.now(timezone.utc)
             event = LLMUsageEvent(
@@ -2392,10 +2423,7 @@ class CloptimaLLMObservability:
                 attribution=attribution or {},
                 metadata={**(metadata or {}), "streamed": True, "stream_chunks": emitted_chunks},
             )
-            if fire_and_forget:
-                self._record_async_with_policy(event, metadata_policy)
-            else:
-                self._post_payload(self._event_payload(event, metadata_policy))
+            self._record_observed_event(event, metadata_policy, fire_and_forget)
             raise
 
     async def observe_async_stream(
@@ -2411,7 +2439,7 @@ class CloptimaLLMObservability:
         metadata_policy: Optional[Union[MetadataPrivacyPolicy, Dict[str, Any]]] = None,
         request_id: Optional[str] = None,
         trace_id: Optional[str] = None,
-        fire_and_forget: bool = False,
+        fire_and_forget: bool = True,
         max_buffered_chunks: int = 256,
     ) -> AsyncIterator[T]:
         started = datetime.now(timezone.utc)
@@ -2459,10 +2487,7 @@ class CloptimaLLMObservability:
                 attribution=attribution or {},
                 metadata={**(metadata or {}), **(extracted.get("metadata") or {}), "streamed": True},
             )
-            if fire_and_forget:
-                self._record_async_with_policy(event, metadata_policy)
-            else:
-                await self._apost_payload(self._event_payload(event, metadata_policy))
+            await self._arecord_observed_event(event, metadata_policy, fire_and_forget)
         except BaseException as exc:
             completed = datetime.now(timezone.utc)
             event = LLMUsageEvent(
@@ -2479,10 +2504,7 @@ class CloptimaLLMObservability:
                 attribution=attribution or {},
                 metadata={**(metadata or {}), "streamed": True, "stream_chunks": emitted_chunks},
             )
-            if fire_and_forget:
-                self._record_async_with_policy(event, metadata_policy)
-            else:
-                await self._apost_payload(self._event_payload(event, metadata_policy))
+            await self._arecord_observed_event(event, metadata_policy, fire_and_forget)
             raise
 
     def observe_call(
@@ -2616,7 +2638,7 @@ class CloptimaLLMObservability:
         metadata_policy: Optional[Union[MetadataPrivacyPolicy, Dict[str, Any]]] = None,
         request_id: Optional[str] = None,
         trace_id: Optional[str] = None,
-        fire_and_forget: bool = False,
+        fire_and_forget: bool = True,
         max_buffered_chunks: int = 256,
         team_id: Optional[str] = None,
         app_id: Optional[str] = None,
@@ -2677,7 +2699,7 @@ class CloptimaLLMObservability:
         metadata_policy: Optional[Union[MetadataPrivacyPolicy, Dict[str, Any]]] = None,
         request_id: Optional[str] = None,
         trace_id: Optional[str] = None,
-        fire_and_forget: bool = False,
+        fire_and_forget: bool = True,
         max_buffered_chunks: int = 256,
         team_id: Optional[str] = None,
         app_id: Optional[str] = None,
@@ -2864,7 +2886,7 @@ class DisabledCloptimaLLMObservability:
         metadata_policy: Optional[Union[MetadataPrivacyPolicy, Dict[str, Any]]] = None,
         request_id: Optional[str] = None,
         trace_id: Optional[str] = None,
-        fire_and_forget: bool = False,
+        fire_and_forget: bool = True,
         max_buffered_chunks: int = 256,
     ) -> Iterator[T]:
         yield from call()
@@ -2882,7 +2904,7 @@ class DisabledCloptimaLLMObservability:
         metadata_policy: Optional[Union[MetadataPrivacyPolicy, Dict[str, Any]]] = None,
         request_id: Optional[str] = None,
         trace_id: Optional[str] = None,
-        fire_and_forget: bool = False,
+        fire_and_forget: bool = True,
         max_buffered_chunks: int = 256,
     ) -> AsyncIterator[T]:
         stream = call()
@@ -2968,7 +2990,7 @@ class DisabledCloptimaLLMObservability:
         metadata_policy: Optional[Union[MetadataPrivacyPolicy, Dict[str, Any]]] = None,
         request_id: Optional[str] = None,
         trace_id: Optional[str] = None,
-        fire_and_forget: bool = False,
+        fire_and_forget: bool = True,
         max_buffered_chunks: int = 256,
         **kwargs: Any,
     ) -> Iterator[T]:
@@ -3000,7 +3022,7 @@ class DisabledCloptimaLLMObservability:
         metadata_policy: Optional[Union[MetadataPrivacyPolicy, Dict[str, Any]]] = None,
         request_id: Optional[str] = None,
         trace_id: Optional[str] = None,
-        fire_and_forget: bool = False,
+        fire_and_forget: bool = True,
         max_buffered_chunks: int = 256,
         **kwargs: Any,
     ) -> AsyncIterator[T]:
@@ -3667,7 +3689,7 @@ def instrument_openai_compatible_stream(
     metadata: Optional[Dict[str, Any]] = None,
     request_id: Optional[str] = None,
     trace_id: Optional[str] = None,
-    fire_and_forget: bool = False,
+    fire_and_forget: bool = True,
     max_buffered_chunks: int = 256,
 ) -> Iterator[Dict[str, Any]]:
     normalized_provider = _normalize_openai_compatible_provider(provider)
@@ -3697,7 +3719,7 @@ def ainstrument_openai_compatible_stream(
     metadata: Optional[Dict[str, Any]] = None,
     request_id: Optional[str] = None,
     trace_id: Optional[str] = None,
-    fire_and_forget: bool = False,
+    fire_and_forget: bool = True,
     max_buffered_chunks: int = 256,
 ) -> AsyncIterator[Dict[str, Any]]:
     normalized_provider = _normalize_openai_compatible_provider(provider)

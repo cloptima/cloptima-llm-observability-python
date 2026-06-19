@@ -58,6 +58,7 @@ from .client import (
     with_workflow,
     workflow,
     wrap_observed_service,
+    STRICT_FINOPS_METADATA_KEYS,
 )
 
 __all__ = [
@@ -113,6 +114,7 @@ __all__ = [
     "extract_vertex_stream_usage",
     "extract_vertex_usage",
     "run_with_attribution",
+    "STRICT_FINOPS_METADATA_KEYS",
     "validate_payload",
     "with_task",
     "with_usage_overrides",

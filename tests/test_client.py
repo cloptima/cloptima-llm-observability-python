@@ -60,6 +60,7 @@ from cloptima_llm_observability import (
     extract_vertex_usage,
     run_with_attribution,
     run_with_workflow,
+    STRICT_FINOPS_METADATA_KEYS,
     task,
     validate_payload,
     with_task,
@@ -647,6 +648,31 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         self.assertEqual(body["metadata"]["route"], "/summaries")
         self.assertNotIn("prompt", body["metadata"])
 
+    def test_observe_call_ignores_telemetry_only_failures_and_reports_on_error(self) -> None:
+        errors = []
+
+        def failing_urlopen(_request, timeout=None):
+            raise urllib.error.URLError("ingest unavailable")
+
+        client = CloptimaLLMObservability(
+            api_base_url=TEST_API_BASE_URL,
+            api_key="pat-test",
+            default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
+            on_error=errors.append,
+        )
+
+        with patch.object(urllib.request, "urlopen", failing_urlopen):
+            result = client.observe_call(
+                provider="openai",
+                model="gpt-4o-mini",
+                call=lambda: {"id": "chatcmpl-telemetry-1"},
+                fire_and_forget=False,
+            )
+
+        self.assertEqual(result["id"], "chatcmpl-telemetry-1")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("ingest unavailable", str(errors[0]))
+
     def test_with_attribution_applies_ambient_attribution_and_preserves_explicit_overrides(self) -> None:
         observed_requests = []
 
@@ -1194,6 +1220,8 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             )
 
         body = observed["body"]
+        self.assertIn("route", STRICT_FINOPS_METADATA_KEYS)
+        self.assertIn("trace_id", STRICT_FINOPS_METADATA_KEYS)
         self.assertEqual(body["metadata"]["route"], "/chat")
         self.assertNotIn("conversation_id", body["metadata"])
         self.assertNotIn("prompt", body["metadata"])
@@ -2426,6 +2454,63 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         self.assertEqual(observed["body"]["output_tokens"], 7)
         self.assertEqual(observed["body"]["metadata"]["streamed"], True)
 
+    def test_observe_stream_ignores_telemetry_only_failures_and_reports_on_error(self) -> None:
+        errors = []
+
+        def failing_urlopen(_request, timeout=None):
+            raise urllib.error.URLError("ingest unavailable")
+
+        client = CloptimaLLMObservability(
+            api_base_url=TEST_API_BASE_URL,
+            api_key="pat-test",
+            default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
+            on_error=errors.append,
+        )
+
+        with patch.object(urllib.request, "urlopen", failing_urlopen):
+            emitted = list(
+                client.observe_stream(
+                    provider="openai",
+                    model="gpt-4o-mini",
+                    fire_and_forget=False,
+                    call=lambda: iter(["chunk-1", "chunk-2"]),
+                )
+            )
+
+        self.assertEqual(emitted, ["chunk-1", "chunk-2"])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("ingest unavailable", str(errors[0]))
+
+    def test_observe_stream_defaults_to_fire_and_forget(self) -> None:
+        observed_bodies = []
+
+        def fake_urlopen(request, timeout):
+            observed_bodies.append(json.loads(request.data.decode("utf-8")))
+            return _FakeResponse()
+
+        client = CloptimaLLMObservability(
+            api_base_url=TEST_API_BASE_URL,
+            api_key="pat-test",
+            default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
+            async_flush_interval_seconds=0,
+        )
+
+        with patch.object(urllib.request, "urlopen", fake_urlopen):
+            emitted = list(
+                client.observe_stream(
+                    provider="openai",
+                    model="gpt-4o-mini",
+                    call=lambda: iter(["chunk-1", "chunk-2"]),
+                )
+            )
+            self.assertEqual(observed_bodies, [])
+            self.assertTrue(client.flush(timeout_seconds=2))
+            self.assertTrue(client.close(timeout_seconds=2))
+
+        self.assertEqual(emitted, ["chunk-1", "chunk-2"])
+        self.assertEqual(len(observed_bodies), 1)
+        self.assertEqual(observed_bodies[0]["metadata"]["streamed"], True)
+
     def test_observe_stream_preserves_vendor_reported_cost_from_custom_extractor(self) -> None:
         observed = {}
 
@@ -2624,11 +2709,6 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
     def test_ainstrument_openai_compatible_stream_observes_existing_async_stream(self) -> None:
         observed = {}
 
-        class FakeAsyncClient(_FakeAsyncClient):
-            pass
-
-        FakeAsyncClient.observed = observed
-
         async def async_chunks():
             yield {"id": "chatcmpl-helper-async-stream", "model": "gpt-4o-mini"}
             yield {
@@ -2641,6 +2721,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
+            async_flush_interval_seconds=0,
         )
 
         async def _run():
@@ -2653,23 +2734,24 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
                 )
             ]
 
-        with patch.dict(sys.modules, {"httpx": SimpleNamespace(AsyncClient=FakeAsyncClient)}):
+        def fake_urlopen(request, timeout):
+            observed["body"] = json.loads(request.data.decode("utf-8"))
+            return _FakeResponse()
+
+        with patch.object(urllib.request, "urlopen", fake_urlopen):
             emitted = asyncio.run(_run())
+            self.assertTrue(client.flush(timeout_seconds=2))
+            self.assertTrue(client.close(timeout_seconds=2))
 
         self.assertEqual(len(emitted), 2)
-        body = json.loads(observed["content"].decode("utf-8"))
+        body = observed["body"]
         self.assertEqual(body["provider_request_id"], "chatcmpl-helper-async-stream")
         self.assertEqual(body["input_tokens"], 6)
         self.assertEqual(body["output_tokens"], 1)
         self.assertEqual(body["metadata"]["integration_mode"], "passive_helper_async_stream")
 
-    def test_observe_async_stream_defaults_to_synchronous_recording(self) -> None:
+    def test_observe_async_stream_defaults_to_fire_and_forget_recording(self) -> None:
         observed = {}
-
-        class FakeAsyncClient(_FakeAsyncClient):
-            pass
-
-        FakeAsyncClient.observed = observed
 
         async def async_chunks():
             yield {"id": "chatcmpl-sync-stream", "model": "gpt-4o-mini"}
@@ -2683,6 +2765,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             api_base_url=TEST_API_BASE_URL,
             api_key="pat-test",
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev"),
+            async_flush_interval_seconds=0,
         )
 
         async def _run():
@@ -2696,14 +2779,20 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
                 )
             ]
 
-        with patch.dict(sys.modules, {"httpx": SimpleNamespace(AsyncClient=FakeAsyncClient)}):
+        def fake_urlopen(request, timeout):
+            observed["body"] = json.loads(request.data.decode("utf-8"))
+            return _FakeResponse()
+
+        with patch.object(urllib.request, "urlopen", fake_urlopen):
             emitted = asyncio.run(_run())
+            self.assertTrue(client.flush(timeout_seconds=2))
+            self.assertTrue(client.close(timeout_seconds=2))
 
         self.assertEqual(len(emitted), 2)
-        body = json.loads(observed["content"].decode("utf-8"))
+        body = observed["body"]
         self.assertEqual(body["provider_request_id"], "chatcmpl-sync-stream")
         self.assertEqual(body["input_tokens"], 3)
-        self.assertIsNone(client._worker)
+        self.assertIsNotNone(client._worker)
 
     def test_request_context_helpers_extract_passive_http_metadata(self) -> None:
         fastapi_request = SimpleNamespace(
@@ -3065,6 +3154,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
                 provider="openai",
                 model="gpt-4o-mini",
                 request_id="req-preview-1",
+                extra_usage_units={"input_image": 3, "output_audio": 5},
                 metadata={"route": "/chat", "prompt": "secret prompt"},
             ),
             default_attribution=LLMAttribution(app_id="agent-api", environment="dev", team_id="platform"),
@@ -3088,6 +3178,13 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
             otlp["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["name"],
             "llm.openai.gpt-4o-mini",
         )
+        attributes = {
+            entry["key"]: entry["value"]
+            for entry in otlp["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"]
+        }
+        self.assertEqual(attributes["gen_ai.usage.input_image"]["intValue"], 3)
+        self.assertEqual(attributes["gen_ai.usage.output_audio"]["intValue"], 5)
+        self.assertEqual(attributes["extra_usage_units"]["stringValue"], '{"input_image": 3, "output_audio": 5}')
 
         batch_payload = preview_batch_payload(
             [
