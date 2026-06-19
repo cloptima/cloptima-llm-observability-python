@@ -1989,7 +1989,7 @@ class CloptimaLLMObservabilityTests(unittest.TestCase):
         body = json.loads(observed["content"].decode("utf-8"))
         self.assertEqual(observed["url"], TEST_INGEST_URL)
         self.assertEqual(observed["headers"]["authorization"], "Bearer pat-test")
-        self.assertEqual(observed["headers"]["user-agent"], "cloptima-llm-observability/0.2.0")
+        self.assertEqual(observed["headers"]["user-agent"], "cloptima-llm-observability/0.2.2")
         self.assertEqual(observed["timeout"], 3)
         self.assertEqual(body["provider"], "openai")
         self.assertEqual(body["total_tokens"], 6)

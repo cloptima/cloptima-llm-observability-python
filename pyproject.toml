@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloptima-llm-observability"
-version = "0.2.1"
+version = "0.2.2"
 description = "LLM usage telemetry SDK for Cloptima reporting, attribution, and analytics"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -32,11 +32,11 @@ classifiers = [
 httpx = ["httpx>=0.27"]
 
 [project.urls]
-Homepage = "https://github.com/cloptima/cloptima-llm-observability-python#readme"
-Repository = "https://github.com/cloptima/cloptima-llm-observability-python"
-Issues = "https://github.com/cloptima/cloptima-llm-observability-python/issues"
-Documentation = "https://github.com/cloptima/cloptima-llm-observability-python/tree/main/examples"
-Changelog = "https://github.com/cloptima/cloptima-llm-observability-python/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/cloptima/llm-observability-python#readme"
+Repository = "https://github.com/cloptima/llm-observability-python"
+Issues = "https://github.com/cloptima/llm-observability-python/issues"
+Documentation = "https://github.com/cloptima/llm-observability-python/tree/main/examples"
+Changelog = "https://github.com/cloptima/llm-observability-python/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 include = ["cloptima_llm_observability*"]

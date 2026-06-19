@@ -279,6 +279,6 @@ Unexpected provider response shape:
 
 ## Support
 
-- Issues: `https://github.com/cloptima/cloptima-llm-observability-python/issues`
+- Issues: `https://github.com/cloptima/llm-observability-python/issues`
 - Security: see `SECURITY.md`
 - Product support: `hello@cloptima.ai`

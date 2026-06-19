@@ -35,7 +35,7 @@ def main() -> None:
             "-c",
             "from importlib.metadata import metadata, version; "
             "from cloptima_llm_observability import init_from_env; "
-            "assert version('cloptima-llm-observability') == '0.1.0'; "
+            "assert version('cloptima-llm-observability') == '0.2.2'; "
             "assert metadata('cloptima-llm-observability')['Name'] == 'cloptima-llm-observability'; "
             "client = init_from_env(env={"
             "'CLOPTIMA_LLM_OBSERVABILITY_API_KEY':'pat-test', "

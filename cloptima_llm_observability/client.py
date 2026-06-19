@@ -27,7 +27,7 @@ from typing import Any, AsyncIterator, Callable, Deque, Dict, Iterable, Iterator
 T = TypeVar("T")
 SDK_EVENT_SCHEMA_VERSION = "cloptima.llm.event.v1"
 SDK_BATCH_SCHEMA_VERSION = "cloptima.llm.batch.v1"
-PACKAGE_VERSION = "0.2.0"
+PACKAGE_VERSION = "0.2.2"
 DEFAULT_API_BASE_URL = "https://api.cloptima.ai"
 SDK_INGEST_PATH = "/v1/ai/integrations/sdk/events"
 OTLP_TRACES_PATH = "/v1/ai/integrations/otlp/traces"
